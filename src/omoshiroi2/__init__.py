@@ -15,10 +15,11 @@ from PySide6.QtWidgets import (
     QSpinBox,
 )
 
-from omoshiroi2 import config
+from omoshiroi2 import omoshiroi
 from omoshiroi2.config import Config
 from omoshiroi2.elo import PromosStrategy, RanksStrategy
 from omoshiroi2.hydrus import Hydrus
+from omoshiroi2.omoshiroi import Omoshiroi
 from omoshiroi2.play import Play
 
 logger = logging.getLogger("omoshiroi2")
@@ -81,8 +82,13 @@ class MainWindow(QMainWindow):
         assert isinstance(access_key, str)
         self.hydrus: Hydrus = Hydrus(access_key)
 
+        self.omoshiroi: Omoshiroi = Omoshiroi()
+
         self.setWindowTitle("omoshiroi2")
         self.resize(800, 600)
+
+        # hydrus-elo
+        hydrus_elo_menu = self.menuBar().addMenu("&hydrus-elo")
 
         promos_action = QAction("&promos", self)
         ranks_action = QAction("&ranks", self)
@@ -94,10 +100,16 @@ class MainWindow(QMainWindow):
         _ = season_action.triggered.connect(self.season)
         _ = routines_action.triggered.connect(self.routines)
 
-        self.menuBar().addAction(promos_action)
-        self.menuBar().addAction(ranks_action)
-        self.menuBar().addAction(season_action)
-        self.menuBar().addAction(routines_action)
+        hydrus_elo_menu.addAction(promos_action)
+        hydrus_elo_menu.addAction(ranks_action)
+        hydrus_elo_menu.addAction(season_action)
+        hydrus_elo_menu.addAction(routines_action)
+
+        # omoshiroi
+        self.omoshiroi.setup_menu(self.menuBar().addMenu("&omoshiroi"))
+
+    def cleanup(self):
+        self.omoshiroi.cleanup()
 
     def promos(self):
         dialog = SettingPage(self.config, False)
@@ -159,7 +171,10 @@ def main() -> None:
 
     main_window = MainWindow()
     main_window.show()
-    sys.exit(app.exec())
+    try:
+        sys.exit(app.exec())
+    finally:
+        main_window.cleanup()
 
 
 if __name__ == "__main__":
