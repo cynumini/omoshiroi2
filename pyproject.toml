@@ -1,7 +1,7 @@
 [project]
-name = "hydrus-elo"
-version = "0.1.0"
-description = "A program for ranking images by personal preference using an Elo rating system."
+name = "omoshiroi2"
+version = "0.2.0"
+description = "A program for ranking images/media by personal preference using an Elo rating system."
 readme = "README.md"
 authors = [
     { name = "cynumini", email = "cynumini@proton.me" }
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-hydrus-elo = "hydrus_elo:main"
+omoshiroi2 = "omoshiroi2:main"
 
 [build-system]
 requires = ["uv_build>=0.12.7,<0.13.0"]

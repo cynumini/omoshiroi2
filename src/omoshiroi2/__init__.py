@@ -15,13 +15,13 @@ from PySide6.QtWidgets import (
     QSpinBox,
 )
 
-from hydrus_elo import config
-from hydrus_elo.config import Config
-from hydrus_elo.elo import PromosStrategy, RanksStrategy
-from hydrus_elo.hydrus import Hydrus
-from hydrus_elo.play import Play
+from omoshiroi2 import config
+from omoshiroi2.config import Config
+from omoshiroi2.elo import PromosStrategy, RanksStrategy
+from omoshiroi2.hydrus import Hydrus
+from omoshiroi2.play import Play
 
-logger = logging.getLogger("hydrus-elo")
+logger = logging.getLogger("omoshiroi2")
 logging.basicConfig(level=logging.INFO)
 
 GAMES_PER_RANK = 5
@@ -81,7 +81,7 @@ class MainWindow(QMainWindow):
         assert isinstance(access_key, str)
         self.hydrus: Hydrus = Hydrus(access_key)
 
-        self.setWindowTitle("hydrus-elo")
+        self.setWindowTitle("omoshiroi2")
         self.resize(800, 600)
 
         promos_action = QAction("&promos", self)

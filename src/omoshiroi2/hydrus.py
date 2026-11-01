@@ -2,8 +2,8 @@ from typing import Any, cast
 
 import hydrus_api
 
-from hydrus_elo.elo import Rank
-from hydrus_elo.file import File
+from omoshiroi2.elo import Rank
+from omoshiroi2.file import File
 
 
 class Hydrus:

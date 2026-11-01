@@ -23,8 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from hydrus_elo.config import Config
-from hydrus_elo.elo import (
+from omoshiroi2.config import Config
+from omoshiroi2.elo import (
     Action,
     Elo,
     Match,
@@ -36,8 +36,8 @@ from hydrus_elo.elo import (
     Strategy,
     UserInput,
 )
-from hydrus_elo.file import File
-from hydrus_elo.hydrus import Hydrus
+from omoshiroi2.file import File
+from omoshiroi2.hydrus import Hydrus
 
 
 @dataclass

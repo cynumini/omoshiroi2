@@ -4,10 +4,10 @@ from typing import TYPE_CHECKING
 from hydrus_api import RenderFormat
 from PySide6.QtGui import QPixmap
 
-from hydrus_elo.elo import Rank
+from omoshiroi2.elo import Rank
 
 if TYPE_CHECKING:
-    from hydrus_elo.hydrus import Hydrus
+    from omoshiroi2.hydrus import Hydrus
 
 
 @dataclass
