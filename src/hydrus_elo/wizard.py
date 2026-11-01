@@ -1,11 +1,8 @@
-from enum import Enum, IntEnum, StrEnum, auto
-from typing import override
+from enum import IntEnum, StrEnum, auto
+from typing import cast, override
 
 from PySide6.QtWidgets import (
-    QButtonGroup,
     QComboBox,
-    QLabel,
-    QRadioButton,
     QSpinBox,
     QVBoxLayout,
     QWizard,
@@ -16,17 +13,14 @@ from hydrus_elo.league import League
 
 
 class Command(StrEnum):
-    RANKS = "Ranks"
-    PROMOS = "Promos"
     SEASON = "Season"
-    PLAYER = "Player"
+    PROMOS = "Promos"
+    RANKS = "Ranks"
 
 
 class Page(IntEnum):
     COMMAND = auto()
-    RANKS_AND_SEASON = auto()
-    PLAYER = auto()
-    FINISH = auto()
+    SETTING = auto()
 
 
 class CommandPage(QWizardPage):
@@ -35,48 +29,29 @@ class CommandPage(QWizardPage):
         self.setTitle("Choose a command")
 
         layout = QVBoxLayout(self)
-        self.group: QButtonGroup = QButtonGroup(self)
 
-        tool_tips: list[str] = [
-            "Random matches in all ranks",
-            "Promotion matches between ranks",
-            "Play as one player",
-            "Run ranks + promos",
-        ]
+        self.command: QComboBox = QComboBox()
+        self.command.addItems([m.value for m in Command])
 
-        for i, mode in enumerate(Command):
-            button: QRadioButton = QRadioButton(mode.value)
-            button.setToolTip(tool_tips[i])
-            self.group.addButton(button, i)
-            layout.addWidget(button)
+        layout.addWidget(self.command)
 
-        self.group.buttons()[0].setChecked(True)
+        self.registerField("command", self.command, "currentText")
 
     @override
     def nextId(self) -> int:
-        button = self.group.checkedButton()
-        assert button
+        command = Command(cast(str, self.field("command")))
+        assert command
 
-        match Command(button.text()):
+        match command:
             case Command.RANKS:
-                return Page.RANKS_AND_SEASON.value
+                return Page.SETTING.value
             case Command.SEASON:
-                return Page.RANKS_AND_SEASON.value
+                return Page.SETTING.value
             case Command.PROMOS:
-                return Page.FINISH.value
-            case Command.PLAYER:
-                return Page.PLAYER.value
-
-    @override
-    def validatePage(self) -> bool:
-        button = self.group.checkedButton()
-        if not button:
-            return False
-        _ = self.wizard().setProperty("command", button.text())
-        return True
+                return Page.SETTING.value
 
 
-class RankAndSeasonPage(QWizardPage):
+class SettingPage(QWizardPage):
     def __init__(self, league: League):
         super().__init__()
 
@@ -95,46 +70,23 @@ class RankAndSeasonPage(QWizardPage):
 
     @override
     def initializePage(self):
-        match Command(self.wizard().property("command")):
+        command = Command(cast(str, self.field("command")))
+        assert command
+
+        match command:
             case Command.RANKS:
                 self.setTitle("Ranks")
+                self.games_per_rank.show()
             case Command.SEASON:
                 self.setTitle("Season")
-            case _:
-                pass
+                self.games_per_rank.show()
+            case Command.PROMOS:
+                self.setTitle("Promos")
+                self.games_per_rank.hide()
 
     @override
     def nextId(self) -> int:
-        return Page.FINISH.value
-
-
-class PlayerPage(QWizardPage):
-    def __init__(self):
-        super().__init__()
-        self.setTitle("Player")
-
-        layout = QVBoxLayout(self)
-
-        self.id: QSpinBox = QSpinBox(maximum=1_000_000_000)
-        self.count: QSpinBox = QSpinBox(minimum=1, value=5)
-
-        layout.addWidget(self.id)
-        layout.addWidget(self.count)
-
-        self.registerField("id", self.id)
-        self.registerField("count", self.count)
-
-    @override
-    def nextId(self) -> int:
-        return Page.FINISH.value
-
-
-class FinishPage(QWizardPage):
-    def __init__(self):
-        super().__init__()
-        self.setTitle("Done")
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("You're all set!"))
+        return -1
 
 
 class Wizard(QWizard):
@@ -143,6 +95,4 @@ class Wizard(QWizard):
         self.setWindowTitle("hydrus-elo")
 
         self.setPage(Page.COMMAND.value, CommandPage())
-        self.setPage(Page.RANKS_AND_SEASON.value, RankAndSeasonPage(league))
-        self.setPage(Page.FINISH.value, FinishPage())
-        self.setPage(Page.PLAYER.value, PlayerPage())
+        self.setPage(Page.SETTING.value, SettingPage(league))

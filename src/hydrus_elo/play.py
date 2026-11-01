@@ -1,17 +1,22 @@
 import logging
 from typing import override
 
-# import pudb
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QImage, QPixmap, QResizeEvent, Qt
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QImage,
+    QKeySequence,
+    QPixmap,
+    QResizeEvent,
+    Qt,
+)
 from PySide6.QtWidgets import (
     QApplication,
-    QHBoxLayout,
     QLabel,
     QMainWindow,
     QSizePolicy,
     QSplitter,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -20,7 +25,6 @@ from hydrus_elo.elo import (
     Elo,
     Match,
     Player,
-    PlayerStrategy,
     PromosStrategy,
     Promotion,
     Rank,
@@ -62,21 +66,43 @@ class ImageThread(QThread):
             self.image_loaded.emit()
 
 
-class ImageLabel(QLabel):
+class ImageWidget(QLabel):
     def __init__(self):
         super().__init__()
         self.original_pixmap: QPixmap | QImage = QPixmap()
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.LABEL_PADDING: int = 4
+        self.info_label: QLabel = QLabel(self)
+        self.info_label.move(self.LABEL_PADDING, self.LABEL_PADDING)
+        self.info_label.raise_()
+
+        self.info_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                background-color: rgba(0, 0, 0, 127);
+                font-size: 16px;
+            }
+        """)
 
     @override
     def setPixmap(self, pixmap: QPixmap | QImage):
         self.original_pixmap = pixmap
         self.update_image()
 
+    def set_file(self, file: File):
+        self.original_pixmap = file.image or QPixmap()
+        self.info_label.setText(f"Elo: {file.elo}, Rank: {file.rank.name}")
+        self.info_label.adjustSize()
+        self.info_label.raise_()
+        self.update_image()
+
     @override
     def resizeEvent(self, event: QResizeEvent):
         super().resizeEvent(event)
         self.update_image()
+        self.info_label.move(self.LABEL_PADDING, self.LABEL_PADDING)
+        self.info_label.raise_()
 
     def update_image(self):
         if self.original_pixmap.isNull():
@@ -90,14 +116,19 @@ class ImageLabel(QLabel):
             )
         )
 
+    def reset_image(self):
+        self.original_pixmap = QPixmap()
+        super().setPixmap(QPixmap())
+        self.info_label.setText("No image")
+        self.info_label.adjustSize()
+        self.info_label.raise_()
+
 
 class Play(QMainWindow):
-    def __init__(
-        self, league: League, league_name: str, hydrus: Hydrus, logger: logging.Logger
-    ):
+    def __init__(self, league: League, hydrus: Hydrus, logger: logging.Logger):
         super().__init__()
         self.league: League = league
-        self.league_name: str = league_name
+        self.league_name: str | None = None
         self.hydrus: Hydrus = hydrus
         self.logger: logging.Logger = logger
         self.running: bool = True
@@ -114,6 +145,12 @@ class Play(QMainWindow):
         draw_action = QAction("&draw", self)
         undo_action = QAction("&undo", self)
         quit_action = QAction("&quit", self)
+
+        win_action.setShortcut(QKeySequence("H"))
+        lose_action.setShortcut(QKeySequence("L"))
+        draw_action.setShortcut(QKeySequence("J"))
+        undo_action.setShortcut(QKeySequence("U"))
+
         _ = win_action.triggered.connect(lambda: self.act(UserInput.WIN))
         _ = lose_action.triggered.connect(lambda: self.act(UserInput.LOSE))
         _ = draw_action.triggered.connect(lambda: self.act(UserInput.DRAW))
@@ -129,31 +166,62 @@ class Play(QMainWindow):
         central = QWidget(self)
         self.splitter: QSplitter = QSplitter(Qt.Orientation.Horizontal, central)
 
-        self.left_label: ImageLabel = ImageLabel()
-        self.right_label: ImageLabel = ImageLabel()
+        self.left_image: ImageWidget = ImageWidget()
+        self.right_image: ImageWidget = ImageWidget()
 
-        self.left_label.setMinimumSize(1, 1)
-        self.right_label.setMinimumSize(1, 1)
-
-        self.left_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Ignored,
-        )
-        self.right_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Ignored,
-        )
-
-        self.splitter.addWidget(self.left_label)
-        self.splitter.addWidget(self.right_label)
+        for image_label in (self.left_image, self.right_image):
+            self.splitter.addWidget(image_label)
+            image_label.setMinimumSize(1, 1)
+            image_label.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Ignored,
+            )
 
         self.setCentralWidget(self.splitter)
 
+        self.rounds: list[Strategy] = []
+
+    def start_round(self):
+        self.resources.clear()
+        self.left_image.setText("left")
+        self.right_image.setText("right")
+
+        strategy = self.rounds.pop(0)
+
+        files = self.get_files(strategy)
+
+        players = [Player(file.id, file.elo, file.rank) for file in files]
+
+        self.elo = Elo(players, strategy)
+
+        self.elo.generate()
+
+        self.elo.print_queue()
+
+        chosen_ids = self.elo.get_chosen_ids(False)
+
+        for id in chosen_ids:
+            resource = self.get_resource(files, id)
+            assert resource
+            self.resources.append(resource)
+
+        size = QApplication.primaryScreen().size()
+        max_width = size.width()
+        max_height = size.height()
+
+        self.image_thread = ImageThread(
+            self.resources, (max_width, max_height), self.hydrus, self.logger
+        )
+        _ = self.image_thread.image_loaded.connect(self.update_image)
+        self.image_thread.start()
+
+        self.advance()
+
     def update_image(self):
         if self.p1 and self.p1.image:
-            self.left_label.setPixmap(self.p1.image)
+            self.left_image.set_file(self.p1)
         if self.p2 and self.p2.image:
-            self.right_label.setPixmap(self.p2.image)
+            self.right_image.set_file(self.p2)
         if self.p1 and self.p1.image and self.p2 and self.p2.image:
             total = (
                 self.p1.size[0] / self.p1.size[1] + self.p2.size[0] / self.p2.size[1]
@@ -214,11 +282,14 @@ class Play(QMainWindow):
                     )
                     self.action = self.elo.next()
         else:
-            print(self.elo.result)
-            _ = self.close()
             for id, data in self.elo.result.items():
                 self.hydrus.set_elo(id, data.elo)
+                assert self.league_name
                 self.hydrus.set_league(id, self.league_name, data.rank)
+            if self.rounds:
+                self.start_round()
+            else:
+                _ = self.close()
             return
         self.update_image()
 
@@ -233,9 +304,6 @@ class Play(QMainWindow):
         elo = 0
 
         ids = self.hydrus.search_files(tags)
-        self.logger.info("With no elo, count = %d", len(ids))
-
-        print(max_ids)
 
         while len(ids) >= max_ids:
             best_elo = elo
@@ -259,11 +327,11 @@ class Play(QMainWindow):
         tag = f"system:has rating for league.{self.league_name}"
         ranked_ids = self.hydrus.search_files([tag])
         ranked_ids_len = len(ranked_ids)
-        print(ranked_ids_len)
         ids.extend(ranked_ids)
         self.logger.info("Ranked files = %d", ranked_ids_len)
         # ranked - end
 
+        assert self.league_name
         tags = self.league.get(self.league_name)
         no_rating_tag = f"system:no rating for league.{self.league_name}"
         tags.append(no_rating_tag)
@@ -273,61 +341,28 @@ class Play(QMainWindow):
                 tags.append("system:limit is 1024")
                 ids.extend(self.hydrus.search_files(tags))
             case PromosStrategy():
-                print(Rank.MaxLeagueLen)
-                elo = self.find_best_elo(Rank.MaxLeagueLen - ranked_ids_len + 1, tags)
+                wood_rank_ids = self.hydrus.search_files(
+                    [tag, f"system:rating for league.{self.league_name} is 1/6"]
+                )
+                elo = self.find_best_elo(
+                    max(Rank.WOOD.max() - len(wood_rank_ids) + 1, 0), tags
+                )
                 elo_tag = f"system:count for elo more than {elo}"
                 tags.append(elo_tag)
                 unranked_ids = self.hydrus.search_files(tags)
                 ids.extend(unranked_ids)
-            case PlayerStrategy():
-                need_to_add = True
-                for id in ids:
-                    if strategy.id == id:
-                        need_to_add = False
-                if need_to_add:
-                    ids.append(strategy.id)
 
         self.logger.info("Unranked files = %d", len(ids) - ranked_ids_len)
 
         return self.hydrus.get_files(ids, self.league_name)
 
-    def play(self, strategy: Strategy):
-        files = self.get_files(strategy)
-
-        players = [Player(file.id, file.elo, file.rank) for file in files]
-
-        self.elo = Elo(players, strategy)
-
-        self.elo.generate()
-
-        self.elo.print_queue()
-
-        chosen_ids = self.elo.get_chosen_ids(False)
-
-        for id in chosen_ids:
-            resource = self.get_resource(files, id)
-            assert resource
-            self.resources.append(resource)
-
-        size = QApplication.primaryScreen().size()
-        max_width = size.width()
-        max_height = size.height()
-
-        self.image_thread = ImageThread(
-            self.resources, (max_width, max_height), self.hydrus, self.logger
-        )
-        _ = self.image_thread.image_loaded.connect(self.update_image)
-        self.image_thread.start()
-
-        self.advance()
+    def play(self, league_name: str, strategy: Strategy):
+        self.rounds.append(strategy)
+        self.league_name = league_name
 
     @override
     def closeEvent(self, event: QCloseEvent):
         if self.image_thread:
             self.image_thread.stop()
-            print("test1")
             _ = self.image_thread.wait()
-            print("test2")
-        print("test3")
         event.accept()
-        print("test4")
