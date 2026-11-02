@@ -1,15 +1,138 @@
-import sqlite3
+import datetime
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
+from dateutil.parser import parse
 from platformdirs import user_data_dir
-from PySide6.QtCore import QObject
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtSql import QSqlDatabase, QSqlQuery
-from PySide6.QtWidgets import QMenu
+from PySide6.QtSql import QSqlQueryModel
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QLineEdit,
+    QMenu,
+    QTextEdit,
+    QWidget,
+)
+
+from omoshiroi2.database import Database
+from omoshiroi2.omoshiroi_elo import OmoshiroiElo
 
 
-class Omoshiroi(QObject):
+class ComboBoxSQL(QComboBox):
+    def __init__(
+        self,
+        database: Database,
+        sql: str,
+        empty_at_start: bool = False,
+    ):
+        super().__init__()
+
+        self.sql_model: QSqlQueryModel = QSqlQueryModel(self)
+        self.sql_model.setQuery(sql, database.db)
+
+        self.setModel(self.sql_model)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+
+        completer = self.completer()
+        assert completer
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+
+        if empty_at_start:
+            self.setEditText("")
+
+
+class DateInput(QLineEdit):
+    def __init__(self):
+        super().__init__()
+        _ = self.editingFinished.connect(self.normalize_date)
+        self.date: datetime.date | None = None
+        self.setText(str(self.date))
+        self.setStyleSheet("background-color: green")
+
+    def normalize_date(self):
+        try:
+            text = self.text().replace("年", "-").replace("月", "-").replace("日", "")
+            parsed_date = parse(text, fuzzy=False).date()
+            self.setText(parsed_date.isoformat())
+            self.setStyleSheet("background-color: green")
+            self.date = parsed_date
+        except ValueError, OverflowError:
+            self.date = None
+            self.setStyleSheet("background-color: red")
+
+    def get_date(self):
+        return self.date
+
+
+class State(StrEnum):
+    new = "New"
+    repeat = "Pepeat"
+    completed = "Completed"
+
+
+class Add(QDialog):
+    def __init__(self, database: Database):
+        super().__init__()
+
+        self.setWindowTitle("Add media")
+
+        self.name: ComboBoxSQL = ComboBoxSQL(database, "SELECT name FROM media", True)
+        self.kind: ComboBoxSQL = ComboBoxSQL(
+            database, "SELECT DISTINCT kind FROM media"
+        )
+        self.release: DateInput = DateInput()
+        self.japanese: QCheckBox = QCheckBox()
+        self.state: QComboBox = QComboBox()
+        self.state.addItems([state for state in State])
+        self.note: QTextEdit = QTextEdit()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+
+        _ = buttons.accepted.connect(self.accept)
+        _ = buttons.rejected.connect(self.reject)
+
+        layout = QFormLayout(self)
+        layout.addRow("Name", self.name)
+        layout.addRow("Kind", self.kind)
+        layout.addRow("Release", self.release)
+        layout.addRow("Japanese", self.japanese)
+        layout.addRow("State", self.state)
+        layout.addRow("Note", self.note)
+        layout.addRow(buttons)
+
+
+class League(QDialog):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("Add media")
+
+        self.name: QLineEdit = QLineEdit()
+        self.sql: QTextEdit = QTextEdit()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+
+        _ = buttons.accepted.connect(self.accept)
+        _ = buttons.rejected.connect(self.reject)
+
+        layout = QFormLayout(self)
+        layout.addRow("Name", self.name)
+        layout.addRow("SQL", self.sql)
+        layout.addRow(buttons)
+
+
+class Omoshiroi(QWidget):
     def __init__(self):
         super().__init__()
 
@@ -18,55 +141,28 @@ class Omoshiroi(QObject):
 
         database_path = data_path / "omoshiroi.db"
 
-        self.database: QSqlDatabase = QSqlDatabase.addDatabase("QSQLITE")
-        self.database.setDatabaseName(str(database_path))
-
-        if not self.database.open():
-            raise RuntimeError(self.database.lastError().text())
+        self.database: Database = Database(database_path)
 
         print(f"The database path is {database_path}")
 
         self.migrate()
 
+        self.omoshiroi_elo: OmoshiroiElo = OmoshiroiElo(self.database)
+
         self.add_action: QAction = QAction("&add", self)
-        self.elo_action: QAction = QAction("&elo", self)
         self.league_action: QAction = QAction("&league", self)
-        self.log_action: QAction = QAction("lo&g", self)
-        self.stats_action: QAction = QAction("&stats", self)
 
         _ = self.add_action.triggered.connect(self.add)
-        _ = self.elo_action.triggered.connect(self.elo)
         _ = self.league_action.triggered.connect(self.league)
-        _ = self.log_action.triggered.connect(self.log)
-        _ = self.stats_action.triggered.connect(self.stats)
 
     def cleanup(self):
         self.database.close()
 
-    def execute_script(self, sql: str):
-        query = QSqlQuery(self.database)
-        statement = ""
-        for line in sql.splitlines(keepends=True):
-            statement += line
-            if sqlite3.complete_statement(statement):
-                statement = statement.strip()
-                if statement and not query.exec(statement):
-                    _ = self.database.rollback()
-                    raise RuntimeError(query.lastError().text())
-                statement = ""
-
-    def fetch_one(self, sql: str) -> Any:  # pyright: ignore[reportAny]
-        query = self.database.exec(sql)
-        if query.next():
-            return query.value(0)  # pyright: ignore[reportAny]
-        else:
-            raise RuntimeError(query.lastError().text())
-
     def migrate(self):
-        version = cast(int, self.fetch_one("PRAGMA user_version;"))
+        version = cast(int, self.database.fetch_one("PRAGMA user_version;"))
         if version == 0:
             print("Creating the database")
-            self.execute_script("""BEGIN;
+            self.database.execute_script("""BEGIN;
 CREATE TABLE media (
     id       INTEGER NOT NULL UNIQUE,
     name     TEXT NOT NULL,
@@ -100,7 +196,7 @@ COMMIT;""")
             version = 1
         if version == 1:
             print("Migrate the database to version 2")
-            _ = self.execute_script("""BEGIN;
+            _ = self.database.execute_script("""BEGIN;
 CREATE TABLE league (
     id   INTEGER NOT NULL UNIQUE,
     name TEXT NOT NULL UNIQUE,
@@ -126,22 +222,30 @@ COMMIT;""")
 
     def setup_menu(self, menu: QMenu):
         menu.addAction(self.add_action)
-        menu.addAction(self.elo_action)
+        elo_menu = menu.addMenu("&elo")
+        self.omoshiroi_elo.setup_menu(elo_menu)
         menu.addAction(self.league_action)
-        menu.addAction(self.log_action)
-        menu.addAction(self.stats_action)
 
     def add(self):
-        print("add")
-
-    def elo(self):
-        print("elo")
+        dialog = Add(self.database)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            _ = self.database.execute(
+                """INSERT INTO media (name, kind, release, japanese, state, note)
+       VALUES (?, ?, ?, ?, ?, ?)""",
+                [
+                    dialog.name.currentText(),
+                    dialog.kind.currentText(),
+                    dialog.release.text(),
+                    dialog.japanese.isChecked(),
+                    dialog.state.currentIndex(),
+                    dialog.note.toPlainText().strip() or None,
+                ],
+            )
 
     def league(self):
-        print("league")
-
-    def log(self):
-        print("log")
-
-    def stats(self):
-        print("stats")
+        dialog = League()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            _ = self.database.execute(
+                "INSERT INTO league (name, sql) VALUES (?, ?)",
+                [dialog.name.text(), dialog.sql.toPlainText().strip()],
+            )

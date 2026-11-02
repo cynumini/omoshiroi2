@@ -1,131 +1,3 @@
-const std = @import("std");
-const cast = std.math.lossyCast;
-const Elo = @import("sakana").Elo;
-
-const clap = @import("clap");
-
-const sqlite3 = @import("sqlite3.zig");
-const p = @import("prompt.zig");
-
-const reset = "\x1b[0m";
-
-inline fn black(name: []const u8) []const u8 {
-    return "\x1b[30m" ++ name ++ reset;
-}
-inline fn red(name: []const u8) []const u8 {
-    return "\x1b[31m" ++ name ++ reset;
-}
-inline fn green(name: []const u8) []const u8 {
-    return "\x1b[32m" ++ name ++ reset;
-}
-inline fn yellow(name: []const u8) []const u8 {
-    return "\x1b[33m" ++ name ++ reset;
-}
-inline fn blue(name: []const u8) []const u8 {
-    return "\x1b[34m" ++ name ++ reset;
-}
-inline fn magenta(name: []const u8) []const u8 {
-    return "\x1b[35m" ++ name ++ reset;
-}
-inline fn cyan(name: []const u8) []const u8 {
-    return "\x1b[36m" ++ name ++ reset;
-}
-inline fn white(name: []const u8) []const u8 {
-    return "\x1b[37m" ++ name ++ reset;
-}
-
-const EloCommands = enum { ranks, promos, player, season, show };
-
-const elo_params = clap.parseParamsComptime(
-    \\-h, --help Display this help and exit.
-    \\<command>
-    \\
-);
-
-fn eloHelp(writer: *std.Io.Writer, name: []const u8) !void {
-    try writer.print("uage: {s} elo ", .{name});
-    try clap.usage(writer, clap.Help, &elo_params);
-    try writer.print("\n", .{});
-    try clap.help(writer, clap.Help, &elo_params, .{});
-    try writer.print(
-        \\Available commands:
-        \\    ranks  - random matches in all ranks
-        \\    promos - promotion matches between ranks
-        \\    player - play as one player
-        \\    season - run ranks + promos
-        \\    show   - show ranked players and positions
-        \\
-    , .{});
-    try writer.flush();
-}
-
-const elo_ranks_params = clap.parseParamsComptime(
-    \\-h, --help              Display this help and exit.
-    \\<str>                   Name of the league
-    \\<usize>                 Number of games per rank
-    \\
-);
-
-fn eloRanksHelp(writer: *std.Io.Writer, name: []const u8) !void {
-    try writer.print("uage: {s} elo ranks ", .{name});
-    try clap.usage(writer, clap.Help, &elo_ranks_params);
-    try writer.print("\n", .{});
-    try clap.help(writer, clap.Help, &elo_ranks_params, .{});
-    try writer.flush();
-}
-
-fn eloSeasonHelp(writer: *std.Io.Writer, name: []const u8) !void {
-    try writer.print("uage: {s} elo season ", .{name});
-    try clap.usage(writer, clap.Help, &elo_ranks_params);
-    try writer.print("\n", .{});
-    try clap.help(writer, clap.Help, &elo_ranks_params, .{});
-    try writer.flush();
-}
-
-const elo_promos_params = clap.parseParamsComptime(
-    \\-h, --help              Display this help and exit.
-    \\<str>                   Name of the league
-    \\
-);
-
-fn eloPromosHelp(writer: *std.Io.Writer, name: []const u8) !void {
-    try writer.print("uage: {s} elo promos ", .{name});
-    try clap.usage(writer, clap.Help, &elo_ranks_params);
-    try writer.print("\n", .{});
-    try clap.help(writer, clap.Help, &elo_ranks_params, .{});
-    try writer.flush();
-}
-
-const elo_player_params = clap.parseParamsComptime(
-    \\-h, --help              Display this help and exit.
-    \\<str>                   Name of the league
-    \\<usize>                 Player ID (REQUIRED)
-    \\<usize>                 Number of games for the player (10)
-    \\
-);
-
-fn eloPlayerHelp(writer: *std.Io.Writer, name: []const u8) !void {
-    try writer.print("uage: {s} elo player ", .{name});
-    try clap.usage(writer, clap.Help, &elo_player_params);
-    try writer.print("\n", .{});
-    try clap.help(writer, clap.Help, &elo_player_params, .{});
-    try writer.flush();
-}
-
-const elo_show_params = clap.parseParamsComptime(
-    \\-h, --help              Display this help and exit.
-    \\<str>                   Name of the league
-    \\
-);
-
-fn eloShowHelp(writer: *std.Io.Writer, name: []const u8) !void {
-    try writer.print("uage: {s} elo show ", .{name});
-    try clap.usage(writer, clap.Help, &elo_show_params);
-    try writer.print("\n", .{});
-    try clap.help(writer, clap.Help, &elo_show_params, .{});
-    try writer.flush();
-}
-
 const Resource = struct {
     id: usize,
     string: []const u8,
@@ -329,26 +201,26 @@ pub fn mainElo(
     if (res.positionals[0]) |command| {
         switch (command) {
             .ranks => {
-                var sub_res = clap.parseEx(
-                    clap.Help,
-                    &elo_ranks_params,
-                    clap.parsers.default,
-                    iter,
-                    .{ .diagnostic = &diag, .allocator = init.gpa },
-                ) catch |err| {
-                    if (err == error.InvalidArgument) {
-                        try eloRanksHelp(writer, program_name);
-                        return;
-                    }
-                    try diag.reportToFile(init.io, .stderr(), err);
-                    return err;
-                };
-                defer sub_res.deinit();
-
-                if (sub_res.args.help != 0 or sub_res.positionals[0] == null) {
-                    try eloRanksHelp(writer, program_name);
-                    return;
-                }
+                // var sub_res = clap.parseEx(
+                //     clap.Help,
+                //     &elo_ranks_params,
+                //     clap.parsers.default,
+                //     iter,
+                //     .{ .diagnostic = &diag, .allocator = init.gpa },
+                // ) catch |err| {
+                //     if (err == error.InvalidArgument) {
+                //         try eloRanksHelp(writer, program_name);
+                //         return;
+                //     }
+                //     try diag.reportToFile(init.io, .stderr(), err);
+                //     return err;
+                // };
+                // defer sub_res.deinit();
+                //
+                // if (sub_res.args.help != 0 or sub_res.positionals[0] == null) {
+                //     try eloRanksHelp(writer, program_name);
+                //     return;
+                // }
 
                 const league_name = sub_res.positionals[0].?;
                 const games_per_rank = sub_res.positionals[1] orelse 5;
