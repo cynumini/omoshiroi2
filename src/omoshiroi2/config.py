@@ -54,3 +54,7 @@ class Config:
         tags = self.leagues.get(key)
         assert tags
         return tags
+
+    @property
+    def league_names(self) -> list[str]:
+        return list(self.leagues.keys())

@@ -1,4 +1,3 @@
-import logging
 import os
 import sys
 from pathlib import Path
@@ -12,44 +11,14 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QMainWindow,
-    QSpinBox,
 )
 
-from omoshiroi2 import omoshiroi
 from omoshiroi2.config import Config
 from omoshiroi2.elo import PromosStrategy, RanksStrategy
 from omoshiroi2.hydrus import Hydrus
 from omoshiroi2.omoshiroi import Omoshiroi
 from omoshiroi2.play import Play
-
-logger = logging.getLogger("omoshiroi2")
-logging.basicConfig(level=logging.INFO)
-
-GAMES_PER_RANK = 5
-
-
-class SettingPage(QDialog):
-    def __init__(self, config: Config, games_per_rank: bool = True):
-        super().__init__()
-
-        self.setWindowTitle("Settings")
-
-        self.league: QComboBox = QComboBox()
-        self.league.addItems(list(config.leagues))
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-
-        _ = buttons.accepted.connect(self.accept)
-        _ = buttons.rejected.connect(self.reject)
-
-        layout = QFormLayout(self)
-        layout.addRow("League", self.league)
-        if games_per_rank:
-            self.games_per_rank: QSpinBox = QSpinBox(minimum=1, value=GAMES_PER_RANK)
-            layout.addRow("Games per rank", self.games_per_rank)
-        layout.addRow(buttons)
+from omoshiroi2.setting_dialog import GAMES_PER_RANK, SettingPage
 
 
 class RoutinesPage(QDialog):
@@ -112,29 +81,29 @@ class MainWindow(QMainWindow):
         self.omoshiroi.cleanup()
 
     def promos(self):
-        dialog = SettingPage(self.config, False)
+        dialog = SettingPage(self.config.league_names, False)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            league = dialog.league.currentText()
+            league = dialog.league
             play: Play = Play(self.config, self.hydrus)
             play.showMaximized()
             play.play(league, PromosStrategy())
             play.start_round()
 
     def ranks(self):
-        dialog = SettingPage(self.config)
+        dialog = SettingPage(self.config.league_names)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            league = dialog.league.currentText()
-            games_per_rank = dialog.games_per_rank.value()
+            league = dialog.league
+            games_per_rank = dialog.games_per_rank
             play: Play = Play(self.config, self.hydrus)
             play.showMaximized()
             play.play(league, RanksStrategy(games_per_rank))
             play.start_round()
 
     def season(self):
-        dialog = SettingPage(self.config)
+        dialog = SettingPage(self.config.league_names)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            league = dialog.league.currentText()
-            games_per_rank = dialog.games_per_rank.value()
+            league = dialog.league
+            games_per_rank = dialog.games_per_rank
             play: Play = Play(self.config, self.hydrus)
             play.showMaximized()
             play.play(league, RanksStrategy(games_per_rank))
@@ -166,7 +135,6 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
-
     app = QApplication([])
 
     main_window = MainWindow()

@@ -1,27 +1,79 @@
 import datetime
+import sqlite3
 from enum import StrEnum
 from pathlib import Path
-from typing import cast
+from typing import Any, cast, override
 
 from dateutil.parser import parse
 from platformdirs import user_data_dir
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
-from PySide6.QtSql import QSqlQueryModel
+from PySide6.QtCore import QLocale, QModelIndex, QObject, QPersistentModelIndex
+from PySide6.QtGui import QAction, QColor, QPainter, Qt
+from PySide6.QtSql import QSqlDatabase, QSqlQuery, QSqlQueryModel
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLineEdit,
     QMenu,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionButton,
+    QStyleOptionViewItem,
+    QTableView,
     QTextEdit,
     QWidget,
 )
 
-from omoshiroi2.database import Database
-from omoshiroi2.omoshiroi_elo import OmoshiroiElo
+from omoshiroi2.setting_dialog import SettingPage
+
+type Row = tuple[Any, ...]
+
+
+class Database:
+    def __init__(self, path: Path):
+        self.db: QSqlDatabase = QSqlDatabase.addDatabase("QSQLITE")
+        self.db.setDatabaseName(str(path))
+
+        if not self.db.open():
+            raise RuntimeError(self.db.lastError().text())
+
+    def close(self):
+        self.db.close()
+
+    def execute_script(self, sql: str):
+        query = QSqlQuery(self.db)
+        statement = ""
+        for line in sql.splitlines(keepends=True):
+            statement += line
+            if sqlite3.complete_statement(statement):
+                statement = statement.strip()
+                if statement and not query.exec(statement):
+                    _ = self.db.rollback()
+                    raise RuntimeError(query.lastError().text())
+                statement = ""
+
+    def fetch_one(self, sql: str) -> Any:  # pyright: ignore[reportAny]
+        query = self.db.exec(sql)
+        if query.next():
+            return query.value(0)  # pyright: ignore[reportAny]
+        else:
+            raise RuntimeError(query.lastError().text())
+
+    def execute(self, sql: str, values: Row | None = None) -> list[Row]:
+        query = QSqlQuery(self.db)
+        _ = query.prepare(sql)
+        if values:
+            for value in values:  # pyright: ignore[reportAny]
+                query.addBindValue(value)
+        if not query.exec():
+            raise RuntimeError(query.lastError().text())
+        rows: list[Row] = []
+        while query.next():
+            rows.append(tuple(query.value(i) for i in range(query.record().count())))
+        return rows
 
 
 class ComboBoxSQL(QComboBox):
@@ -30,6 +82,7 @@ class ComboBoxSQL(QComboBox):
         database: Database,
         sql: str,
         empty_at_start: bool = False,
+        editable: bool = True,
     ):
         super().__init__()
 
@@ -37,15 +90,16 @@ class ComboBoxSQL(QComboBox):
         self.sql_model.setQuery(sql, database.db)
 
         self.setModel(self.sql_model)
-        self.setEditable(True)
+        self.setEditable(editable)
         self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
 
-        completer = self.completer()
-        assert completer
-        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        if editable:
+            completer = self.completer()
+            assert completer
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
 
-        if empty_at_start:
-            self.setEditText("")
+            if empty_at_start:
+                self.setEditText("")
 
 
 class DateInput(QLineEdit):
@@ -73,7 +127,7 @@ class DateInput(QLineEdit):
 
 class State(StrEnum):
     new = "New"
-    repeat = "Pepeat"
+    repeat = "Repeat"
     completed = "Completed"
 
 
@@ -110,11 +164,11 @@ class Add(QDialog):
         layout.addRow(buttons)
 
 
-class League(QDialog):
+class AddLeague(QDialog):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Add media")
+        self.setWindowTitle("Add league")
 
         self.name: QLineEdit = QLineEdit()
         self.sql: QTextEdit = QTextEdit()
@@ -232,20 +286,182 @@ COMMIT;""")
             _ = self.database.execute(
                 """INSERT INTO media (name, kind, release, japanese, state, note)
        VALUES (?, ?, ?, ?, ?, ?)""",
-                [
+                (
                     dialog.name.currentText(),
                     dialog.kind.currentText(),
                     dialog.release.text(),
                     dialog.japanese.isChecked(),
                     dialog.state.currentIndex(),
                     dialog.note.toPlainText().strip() or None,
-                ],
+                ),
             )
 
     def league(self):
-        dialog = League()
+        dialog = AddLeague()
         if dialog.exec() == QDialog.DialogCode.Accepted:
             _ = self.database.execute(
                 "INSERT INTO league (name, sql) VALUES (?, ?)",
-                [dialog.name.text(), dialog.sql.toPlainText().strip()],
+                (dialog.name.text(), dialog.sql.toPlainText().strip()),
             )
+
+
+class BoolDelegate(QStyledItemDelegate):
+    @override
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex | QPersistentModelIndex,
+    ):
+        value = bool(cast(int, index.data(Qt.ItemDataRole.DisplayRole)))
+        checkbox = QStyleOptionButton()
+        if value:
+            checkbox.state = QStyle.StateFlag.State_On
+        style = option.widget.style()
+        checkbox.rect = style.subElementRect(
+            QStyle.SubElement.SE_CheckBoxIndicator, checkbox, option.widget
+        )
+        checkbox.rect.moveCenter(option.rect.center())
+        style.drawControl(
+            QStyle.ControlElement.CE_CheckBox, checkbox, painter, option.widget
+        )
+
+
+class StateDelegate(QStyledItemDelegate):
+    @override
+    def displayText(self, value: Any, locale: QLocale | QLocale.Language) -> str:  # pyright: ignore[reportAny]
+        state = cast(int, value)
+        if state == 0:
+            return "new"
+        elif state == 1:
+            return "repeat"
+        else:
+            return "completed"
+
+
+class RankDelegate(QStyledItemDelegate):
+    @override
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex | QPersistentModelIndex,
+    ):
+        rank = cast(int, index.data())
+        stars = "★" * rank if rank else ""
+        painter.save()
+        painter.setPen(QColor("#0000FF"))
+        _ = painter.drawText(
+            option.rect,
+            Qt.AlignmentFlag.AlignCenter,
+            stars,
+        )
+        painter.restore()
+
+
+class Show(QWidget):
+    def __init__(self, database: Database, league_name: str):
+        super().__init__()
+
+        self.setWindowTitle(f"Show {league_name}")
+        self.resize(1280, 720)
+
+        league_id, league_sql = cast(
+            tuple[int, str],
+            database.execute(
+                "SELECT id, sql FROM league WHERE name = ?", (league_name,)
+            )[0],
+        )
+
+        self.model: QSqlQueryModel = QSqlQueryModel(self)
+
+        query = QSqlQuery(database.db)
+        _ = query.prepare(f"""SELECT
+    media.id,
+    media.name,
+    media.kind,
+    media.release,
+    media.elo,
+    media.japanese,
+    media.state,
+    media.note,
+    COALESCE(rank.rank, 0) AS rank
+FROM media
+LEFT JOIN rank
+    ON rank.media_id = media.id
+    AND rank.league_id = ?
+WHERE {league_sql}
+ORDER BY COALESCE(rank.rank, 0) DESC, media.elo DESC""")
+        query.addBindValue(league_id)
+
+        if not query.exec():
+            print(query.lastError().text())
+            assert False
+
+        self.model.setQuery(query)
+
+        self.table_view: QTableView = QTableView(self)
+        self.table_view.setModel(self.model)
+        self.table_view.setItemDelegateForColumn(5, BoolDelegate(self.table_view))
+        self.table_view.setItemDelegateForColumn(6, StateDelegate(self.table_view))
+        self.table_view.setItemDelegateForColumn(8, RankDelegate(self.table_view))
+
+        layout = QHBoxLayout(self)
+        self.setLayout(layout)
+
+        layout.addWidget(self.table_view)
+
+
+def setting_page_from_database(
+    database: Database, games_per_rank: bool = True
+) -> SettingPage:
+    leagues: list[str] = [
+        data[0] for data in database.execute("SELECT league.name from league")
+    ]
+    return SettingPage(leagues, games_per_rank)
+
+
+class OmoshiroiElo(QObject):
+    def __init__(self, database: Database):
+        super().__init__()
+
+        self.database: Database = database
+
+        self.ranks_action: QAction = QAction("&ranks")
+        self.promos_action: QAction = QAction("&promos")
+        self.season_action: QAction = QAction("&season")
+        self.show_action: QAction = QAction("s&how")
+
+        _ = self.ranks_action.triggered.connect(self.ranks)
+        _ = self.promos_action.triggered.connect(self.promos)
+        _ = self.season_action.triggered.connect(self.season)
+        _ = self.show_action.triggered.connect(self.show)
+
+        self.show_window: Show | None = None
+
+    def setup_menu(self, menu: QMenu):
+        menu.addAction(self.ranks_action)
+        menu.addAction(self.promos_action)
+        menu.addAction(self.season_action)
+        menu.addAction(self.show_action)
+
+    def ranks(self):
+        setting_dialog = setting_page_from_database(self.database)
+        if setting_dialog.exec():
+            pass
+
+    def promos(self):
+        setting_dialog = setting_page_from_database(self.database, False)
+        if setting_dialog.exec():
+            pass
+
+    def season(self):
+        setting_dialog = setting_page_from_database(self.database)
+        if setting_dialog.exec():
+            pass
+
+    def show(self):
+        setting_dialog = setting_page_from_database(self.database, False)
+        if setting_dialog.exec():
+            self.show_window = Show(self.database, setting_dialog.league)
+            self.show_window.show()

@@ -173,58 +173,9 @@ pub fn mainElo(
     writer: *std.Io.Writer,
     database: *sqlite3.SQLite3,
 ) !void {
-    const parsers = .{
-        .command = clap.parsers.enumeration(EloCommands),
-        .path = clap.parsers.string,
-    };
-
-    var diag = clap.Diagnostic{};
-    var res = clap.parseEx(clap.Help, &elo_params, parsers, iter, .{
-        .diagnostic = &diag,
-        .allocator = init.gpa,
-        .terminating_positional = 0,
-    }) catch |err| {
-        if (err == error.NameNotPartOfEnum) {
-            try eloHelp(writer, program_name);
-            return;
-        }
-        try diag.reportToFile(init.io, .stderr(), err);
-        return err;
-    };
-    defer res.deinit();
-
-    if (res.args.help != 0 or res.positionals[0] == null) {
-        try eloHelp(writer, program_name);
-        return;
-    }
-
     if (res.positionals[0]) |command| {
         switch (command) {
             .ranks => {
-                // var sub_res = clap.parseEx(
-                //     clap.Help,
-                //     &elo_ranks_params,
-                //     clap.parsers.default,
-                //     iter,
-                //     .{ .diagnostic = &diag, .allocator = init.gpa },
-                // ) catch |err| {
-                //     if (err == error.InvalidArgument) {
-                //         try eloRanksHelp(writer, program_name);
-                //         return;
-                //     }
-                //     try diag.reportToFile(init.io, .stderr(), err);
-                //     return err;
-                // };
-                // defer sub_res.deinit();
-                //
-                // if (sub_res.args.help != 0 or sub_res.positionals[0] == null) {
-                //     try eloRanksHelp(writer, program_name);
-                //     return;
-                // }
-
-                const league_name = sub_res.positionals[0].?;
-                const games_per_rank = sub_res.positionals[1] orelse 5;
-
                 try play(
                     init,
                     writer,
@@ -234,87 +185,9 @@ pub fn mainElo(
                 );
             },
             .promos => {
-                var sub_res = clap.parseEx(
-                    clap.Help,
-                    &elo_promos_params,
-                    clap.parsers.default,
-                    iter,
-                    .{ .diagnostic = &diag, .allocator = init.gpa },
-                ) catch |err| {
-                    if (err == error.InvalidArgument) {
-                        try eloPromosHelp(writer, program_name);
-                        return;
-                    }
-                    try diag.reportToFile(init.io, .stderr(), err);
-                    return err;
-                };
-                defer sub_res.deinit();
-
-                if (sub_res.args.help != 0 or sub_res.positionals[0] == null) {
-                    try eloPromosHelp(writer, program_name);
-                    return;
-                }
-
-                const league_name = sub_res.positionals[0].?;
-
                 try play(init, writer, database, .promos, league_name);
             },
-            .player => {
-                var sub_res = clap.parseEx(
-                    clap.Help,
-                    &elo_player_params,
-                    clap.parsers.default,
-                    iter,
-                    .{ .diagnostic = &diag, .allocator = init.gpa },
-                ) catch |err| {
-                    if (err == error.InvalidArgument) {
-                        try eloPlayerHelp(writer, program_name);
-                        return;
-                    }
-                    try diag.reportToFile(init.io, .stderr(), err);
-                    return err;
-                };
-                defer sub_res.deinit();
-
-                if (sub_res.args.help != 0 or sub_res.positionals[0] == null) {
-                    try eloPlayerHelp(writer, program_name);
-                    return;
-                }
-
-                const league_name = sub_res.positionals[0].?;
-                const player_id = sub_res.positionals[1].?;
-                const games_count = sub_res.positionals[2] orelse 10;
-
-                try play(init, writer, database, .{ .player = .{
-                    .id = player_id,
-                    .count = games_count,
-                } }, league_name);
-            },
             .season => {
-                var sub_res = clap.parseEx(
-                    clap.Help,
-                    &elo_ranks_params,
-                    clap.parsers.default,
-                    iter,
-                    .{ .diagnostic = &diag, .allocator = init.gpa },
-                ) catch |err| {
-                    if (err == error.InvalidArgument) {
-                        try eloSeasonHelp(writer, program_name);
-                        return;
-                    }
-                    try diag.reportToFile(init.io, .stderr(), err);
-                    return err;
-                };
-                defer sub_res.deinit();
-
-                if (sub_res.args.help != 0 or sub_res.positionals[0] == null) {
-                    try eloSeasonHelp(writer, program_name);
-                    return;
-                }
-
-                const league_name = sub_res.positionals[0].?;
-                const games_per_rank = sub_res.positionals[1] orelse 5;
-
                 std.log.info("Ranks", .{});
                 try play(
                     init,
@@ -325,76 +198,6 @@ pub fn mainElo(
                 );
                 std.log.info("Promotions", .{});
                 try play(init, writer, database, .promos, league_name);
-            },
-            .show => {
-                var sub_res = clap.parseEx(
-                    clap.Help,
-                    &elo_show_params,
-                    clap.parsers.default,
-                    iter,
-                    .{ .diagnostic = &diag, .allocator = init.gpa },
-                ) catch |err| {
-                    if (err == error.InvalidArgument) {
-                        try eloShowHelp(writer, program_name);
-                        return;
-                    }
-                    try diag.reportToFile(init.io, .stderr(), err);
-                    return err;
-                };
-                defer sub_res.deinit();
-
-                if (sub_res.args.help != 0 or sub_res.positionals[0] == null) {
-                    try eloShowHelp(writer, program_name);
-                    return;
-                }
-
-                const league_name = sub_res.positionals[0].?;
-
-                const league = (try database.fetchOne2(init.gpa, League, "SELECT id, sql FROM league WHERE name = ?", .{league_name})).?;
-                defer init.gpa.free(league.sql);
-                const sql = try std.fmt.allocPrintSentinel(
-                    init.gpa,
-                    \\SELECT media.id, media.elo, COALESCE(rank.rank, 0) AS rank
-                    \\FROM media
-                    \\LEFT JOIN rank ON rank.media_id = media.id AND rank.league_id = ?
-                    \\WHERE {s} ORDER BY media.elo ASC
-                ,
-                    .{league.sql},
-                    0,
-                );
-                defer init.gpa.free(sql);
-                std.debug.print("{s}\n", .{sql});
-
-                var players = try database.fetchMany(
-                    init.gpa,
-                    Elo.Player,
-                    sql,
-                    .{league.id},
-                );
-                defer players.deinit(init.gpa);
-
-                var resources = std.ArrayList(Resource).empty;
-                defer {
-                    for (resources.items) |item| item.deinit(init.gpa);
-                    resources.deinit(init.gpa);
-                }
-
-                for (players.items) |player| {
-                    try resources.append(init.gpa, try .init(init.gpa, database, player.id));
-                }
-
-                inline for (@typeInfo(Elo.Rank).@"enum".fields) |field| {
-                    const rank: Elo.Rank = @enumFromInt(field.value);
-                    std.debug.print(yellow("{s}\n"), .{rank.toString()});
-                    for (players.items) |player| {
-                        if (player.rank == rank) {
-                            try writer.print(
-                                "{} - {s}\n",
-                                .{ player.elo, getResource(resources.items, player.id).?.string },
-                            );
-                        }
-                    }
-                }
             },
         }
     }
