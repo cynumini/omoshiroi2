@@ -6,7 +6,7 @@ from typing import Any, cast, override
 
 from dateutil.parser import parse
 from platformdirs import user_data_dir
-from PySide6.QtCore import QLocale, QModelIndex, QObject, QPersistentModelIndex
+from PySide6.QtCore import QLocale, QModelIndex, QPersistentModelIndex
 from PySide6.QtGui import QAction, QColor, QPainter, Qt
 from PySide6.QtSql import QSqlDatabase, QSqlQuery, QSqlQueryModel
 from PySide6.QtWidgets import (
@@ -201,11 +201,19 @@ class Omoshiroi(QWidget):
 
         self.migrate()
 
-        self.omoshiroi_elo: OmoshiroiElo = OmoshiroiElo(self.database)
+        self.show_window: Show | None = None
 
         self.add_action: QAction = QAction("&add", self)
         self.league_action: QAction = QAction("&league", self)
+        self.ranks_action: QAction = QAction("&ranks")
+        self.promos_action: QAction = QAction("&promos")
+        self.season_action: QAction = QAction("&season")
+        self.show_action: QAction = QAction("s&how elo")
 
+        _ = self.ranks_action.triggered.connect(self.ranks)
+        _ = self.promos_action.triggered.connect(self.promos)
+        _ = self.season_action.triggered.connect(self.season)
+        _ = self.show_action.triggered.connect(self.show_elo)
         _ = self.add_action.triggered.connect(self.add)
         _ = self.league_action.triggered.connect(self.league)
 
@@ -276,8 +284,10 @@ COMMIT;""")
 
     def setup_menu(self, menu: QMenu):
         menu.addAction(self.add_action)
-        elo_menu = menu.addMenu("&elo")
-        self.omoshiroi_elo.setup_menu(elo_menu)
+        menu.addAction(self.ranks_action)
+        menu.addAction(self.promos_action)
+        menu.addAction(self.season_action)
+        menu.addAction(self.show_action)
         menu.addAction(self.league_action)
 
     def add(self):
@@ -303,6 +313,27 @@ COMMIT;""")
                 "INSERT INTO league (name, sql) VALUES (?, ?)",
                 (dialog.name.text(), dialog.sql.toPlainText().strip()),
             )
+
+    def ranks(self):
+        setting_dialog = setting_page_from_database(self.database)
+        if setting_dialog.exec():
+            pass
+
+    def promos(self):
+        setting_dialog = setting_page_from_database(self.database, False)
+        if setting_dialog.exec():
+            pass
+
+    def season(self):
+        setting_dialog = setting_page_from_database(self.database)
+        if setting_dialog.exec():
+            pass
+
+    def show_elo(self):
+        setting_dialog = setting_page_from_database(self.database, False)
+        if setting_dialog.exec():
+            self.show_window = Show(self.database, setting_dialog.league)
+            self.show_window.show()
 
 
 class BoolDelegate(QStyledItemDelegate):
@@ -419,49 +450,3 @@ def setting_page_from_database(
         data[0] for data in database.execute("SELECT league.name from league")
     ]
     return SettingPage(leagues, games_per_rank)
-
-
-class OmoshiroiElo(QObject):
-    def __init__(self, database: Database):
-        super().__init__()
-
-        self.database: Database = database
-
-        self.ranks_action: QAction = QAction("&ranks")
-        self.promos_action: QAction = QAction("&promos")
-        self.season_action: QAction = QAction("&season")
-        self.show_action: QAction = QAction("s&how")
-
-        _ = self.ranks_action.triggered.connect(self.ranks)
-        _ = self.promos_action.triggered.connect(self.promos)
-        _ = self.season_action.triggered.connect(self.season)
-        _ = self.show_action.triggered.connect(self.show)
-
-        self.show_window: Show | None = None
-
-    def setup_menu(self, menu: QMenu):
-        menu.addAction(self.ranks_action)
-        menu.addAction(self.promos_action)
-        menu.addAction(self.season_action)
-        menu.addAction(self.show_action)
-
-    def ranks(self):
-        setting_dialog = setting_page_from_database(self.database)
-        if setting_dialog.exec():
-            pass
-
-    def promos(self):
-        setting_dialog = setting_page_from_database(self.database, False)
-        if setting_dialog.exec():
-            pass
-
-    def season(self):
-        setting_dialog = setting_page_from_database(self.database)
-        if setting_dialog.exec():
-            pass
-
-    def show(self):
-        setting_dialog = setting_page_from_database(self.database, False)
-        if setting_dialog.exec():
-            self.show_window = Show(self.database, setting_dialog.league)
-            self.show_window.show()

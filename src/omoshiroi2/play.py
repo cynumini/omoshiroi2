@@ -1,16 +1,11 @@
+from abc import abstractmethod
+from ast import For
 from dataclasses import dataclass
-from typing import override
+from enum import Enum, StrEnum
+from typing import Callable, override
 
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtGui import (
-    QAction,
-    QCloseEvent,
-    QImage,
-    QKeySequence,
-    QPixmap,
-    QResizeEvent,
-    Qt,
-)
+from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap, QResizeEvent, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -22,28 +17,48 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from hydrus_api import RenderFormat
 
-from omoshiroi2.config import Config
-from omoshiroi2.elo import (
-    Action,
-    Elo,
-    Match,
-    Player,
-    PromosStrategy,
-    Promotion,
-    Rank,
-    RanksStrategy,
-    Strategy,
-    UserInput,
-)
-from omoshiroi2.file import File
-from omoshiroi2.hydrus import Hydrus
+from omoshiroi2.elo import Action, Elo, Match, Player, PromosStrategy, Promotion, Rank, RanksStrategy, Strategy, UserInput
 
+
+
+type LoadFileFn = Callable[[int, Format, tuple[int, int]], bytes],
 
 @dataclass
-class Round:
-    league: str
-    strategy: Strategy
+class File:
+    id: int
+    elo: int
+    rank: Rank
+    size: tuple[int, int]
+    image: QPixmap | None = None
+    play: Play
+
+    def scale_to(
+        self, size: tuple[float, float], max_size: tuple[float, float]
+    ) -> tuple[int, int]:
+        aspect = size[0] / size[1]
+
+        if max_size[0] / max_size[1] > aspect:
+            return int(max_size[1] * aspect), int(max_size[1])
+        else:
+            return int(max_size[0]), int(max_size[0] / aspect)
+
+    def load_image(self, max_size: tuple[int, int], load_image: LoadFileFn):
+        if self.size[0] > max_size[0] or self.size[1] > max_size[1]:
+            self.size = self.scale_to(self.size, max_size)
+        self.image = QPixmap()
+        _ = self.image.loadFromData(
+            play.load_image(self.id, Format.JPEG, self.size), format=Format.JPEG
+        )
+
+    # def load_image(self, max_size: tuple[int, int], hydrus: Hydrus):
+    #     if self.size[0] > max_size[0] or self.size[1] > max_size[1]:
+    #         self.size = self.scale_to(self.size, max_size)
+    #     self.image = QPixmap()
+    #     _ = self.image.loadFromData(
+    #         hydrus.render(self.id, RenderFormat.JPEG, self.size), format="JPEG"
+    #     )
 
 
 class ImageThread(QThread):
@@ -53,19 +68,19 @@ class ImageThread(QThread):
         self,
         files: list[File],
         max_size: tuple[int, int],
-        hydrus: Hydrus,
+        load_image: LoadFileFn,
     ):
         super().__init__()
         self.files: list[File] = files
         self.max_size: tuple[int, int] = max_size
-        self.hydrus: Hydrus = hydrus
+        self.load_image: LoadFileFn =load_image
 
     @override
     def run(self):
         for file in self.files:
             if self.isInterruptionRequested():
                 break
-            file.load_image(self.max_size, self.hydrus)
+            file.load_image(self.max_size, self.load_image)
             self.image_loaded.emit()
 
 
@@ -126,12 +141,14 @@ class ImageWidget(QLabel):
         self.info_label.adjustSize()
         self.info_label.raise_()
 
+@dataclass
+class Round:
+    league: str
+    strategy: Strategy
 
 class Play(QWidget):
-    def __init__(self, config: Config, hydrus: Hydrus):
+    def __init__(self):
         super().__init__()
-        self.config: Config = config
-        self.hydrus: Hydrus = hydrus
         self.image_thread: ImageThread | None = None
         self.elo: Elo | None = None
         self.action: Action | None = None
@@ -203,6 +220,15 @@ class Play(QWidget):
         self.rank: Rank | None = None
         self.first: bool = True
 
+    def set_elo(self, id: int, elo: int):
+        raise NotImplementedError
+
+    def set_league(self, id: int, league: str, rank: Rank):
+        raise NotImplementedError
+
+    def load_image(self, id: int, format: RenderFormat, size: tuple[int, int]):
+        raise NotImplementedError
+
     def start_round(self):
         if self.first:
             self.round_bar.setRange(0, len(self.rounds))
@@ -241,7 +267,7 @@ class Play(QWidget):
         max_height = size.height()
 
         self.image_thread = ImageThread(
-            self.resources, (max_width, max_height), self.hydrus
+            self.resources, (max_width, max_height), self.load_image
         )
         _ = self.image_thread.image_loaded.connect(self.update_image)
         self.image_thread.start()
@@ -318,9 +344,9 @@ class Play(QWidget):
                     self.action = self.elo.next()
         else:
             for id, data in self.elo.result.items():
-                self.hydrus.set_elo(id, data.elo)
+                self.set_elo(id, data.elo)
                 assert self.round
-                self.hydrus.set_league(id, self.round.league, data.rank)
+                self.set_league(id, self.round.league, data.rank)
             if self.rounds:
                 self.round_bar.setValue(self.round_bar.value() + 1)
                 self.start_round()
