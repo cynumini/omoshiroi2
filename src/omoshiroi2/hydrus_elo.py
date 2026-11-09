@@ -1,6 +1,5 @@
 import json
 import os
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast, override
 
@@ -21,10 +20,45 @@ from omoshiroi2.elo import (
     PromosStrategy,
     Rank,
     RanksStrategy,
-    Strategy,
 )
 from omoshiroi2.play import File, Play
+from omoshiroi2.query import Query
 from omoshiroi2.setting_dialog import GAMES_PER_RANK, SettingPage
+
+
+class QueryHydrus(Query):
+    def __init__(self, league: str, tags: list[str]):
+        super().__init__(league)
+        self.tags: list[str] = tags
+
+    def copy(self, tag: str) -> Query:
+        tags = self.tags.copy()
+        tags.append(tag)
+        return QueryHydrus(self.league, tags)
+
+    @override
+    def count_for_elo_more_than(self, elo: int) -> Query:
+        return self.copy(f"system:count for elo more than {elo}")
+
+    @override
+    def no_rating_for_league(self) -> Query:
+        return self.copy(f"system:no rating for league.{self.league}")
+
+    @override
+    def has_rating_for_league(self, rank: None | Rank = None) -> Query:
+        if rank is None:
+            return QueryHydrus(
+                self.league, [f"system:has rating for league.{self.league}"]
+            )
+        else:
+            return QueryHydrus(
+                self.league,
+                [f"system:rating for league.{self.league} is {rank.value}/6"],
+            )
+
+    @override
+    def limit(self, value: int) -> Query:
+        return self.copy(f"system:limit is {value}")
 
 
 class PlayHydrus(Play):
@@ -42,10 +76,17 @@ class PlayHydrus(Play):
         self.hydrus.set_league(id, league, rank)
 
     @override
-    def load_image(
-        self, id: int, format: hydrus_api.RenderFormat, size: tuple[int, int]
-    ):
-        self.hydrus.render(id, format, size)
+    def load_image(self, file: File, format: hydrus_api.RenderFormat) -> bytes:
+        return self.hydrus.render(file.id, format, file.size)
+
+    @override
+    def search_files(self, query: Query) -> list[int]:
+        query = cast(QueryHydrus, query)
+        return self.hydrus.search_files(query.tags)
+
+    @override
+    def get_files(self, ids: list[int], league: str):
+        return self.hydrus.get_files(ids, league)
 
 
 class Hydrus:
@@ -132,6 +173,7 @@ class Config:
         return cast(int, data.get("version", 0))
 
     def __init__(self, path: Path) -> None:
+        super().__init__()
         save = False
         if path.exists():
             data: dict[str, Any] = json.loads(path.read_text())  # pyright: ignore[reportAny]
@@ -172,10 +214,10 @@ class Config:
             }
             _ = path.write_text(json.dumps(data))
 
-    def get(self, key: str) -> list[str]:
+    def get(self, key: str) -> Query:
         tags = self.leagues.get(key)
         assert tags
-        return tags
+        return QueryHydrus(key, tags)
 
     @property
     def league_names(self) -> list[str]:
@@ -232,10 +274,10 @@ class HydrusElo(QWidget):
     def promos(self):
         dialog = SettingPage(self.config.league_names, False)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            league = dialog.league
             play: PlayHydrus = PlayHydrus(self.config, self.hydrus)
             play.showMaximized()
-            play.play(league, PromosStrategy())
+            query = self.config.get(dialog.league)
+            play.play(query, PromosStrategy())
             play.start_round()
 
     def ranks(self):
@@ -243,18 +285,18 @@ class HydrusElo(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             play: PlayHydrus = PlayHydrus(self.config, self.hydrus)
             play.showMaximized()
-            play.play(dialog.league, RanksStrategy(dialog.games_per_rank))
+            query = self.config.get(dialog.league)
+            play.play(query, RanksStrategy(dialog.games_per_rank))
             play.start_round()
 
     def season(self):
         dialog = SettingPage(self.config.league_names)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            league = dialog.league
-            games_per_rank = dialog.games_per_rank
             play: PlayHydrus = PlayHydrus(self.config, self.hydrus)
             play.showMaximized()
-            play.play(league, RanksStrategy(games_per_rank))
-            play.play(league, PromosStrategy())
+            query = self.config.get(dialog.league)
+            play.play(query, RanksStrategy(dialog.games_per_rank))
+            play.play(query, PromosStrategy())
             play.start_round()
 
     def routines(self):
@@ -268,14 +310,15 @@ class HydrusElo(QWidget):
                 games_per_rank = cast(int, r.get("games_per_rank", GAMES_PER_RANK))
                 assert league and strategy
                 assert isinstance(league, str) and isinstance(strategy, str)
+                query = self.config.get(league)
                 match strategy:
                     case "season":
-                        play.play(league, RanksStrategy(games_per_rank))
-                        play.play(league, PromosStrategy())
+                        play.play(query, RanksStrategy(games_per_rank))
+                        play.play(query, PromosStrategy())
                     case "ranks":
-                        play.play(league, RanksStrategy(games_per_rank))
+                        play.play(query, RanksStrategy(games_per_rank))
                     case "promos":
-                        play.play(league, PromosStrategy())
+                        play.play(query, PromosStrategy())
                     case _:
                         raise RuntimeError(f"{strategy} is not implemented")
             play.start_round()

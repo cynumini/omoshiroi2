@@ -4,7 +4,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast, override
 
+import hydrus_api
 from dateutil.parser import parse
+from PIL import Image as PILImage
 from platformdirs import user_data_dir
 from PySide6.QtCore import QLocale, QModelIndex, QPersistentModelIndex
 from PySide6.QtGui import QAction, QColor, QPainter, Qt
@@ -14,6 +16,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLineEdit,
@@ -27,6 +30,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from omoshiroi2.elo import PromosStrategy, Rank, RanksStrategy
+from omoshiroi2.play import File, Play
+from omoshiroi2.query import Query
 from omoshiroi2.setting_dialog import SettingPage
 
 type Row = tuple[Any, ...]
@@ -74,6 +80,98 @@ class Database:
         while query.next():
             rows.append(tuple(query.value(i) for i in range(query.record().count())))
         return rows
+
+    def get_query(self, league: str):
+        sql = cast(
+            str, self.execute(f'SELECT sql FROM league WHERE name = "{league}"')[0][0]
+        )
+        return QueryOmoshiroi(league, sql)
+
+    def set_elo(self, id: int, elo: int):
+        query = QSqlQuery(self.db)
+        _ = query.prepare("UPDATE media SET elo = ? WHERE id = ?")
+        query.addBindValue(elo)
+        query.addBindValue(id)
+
+        if not query.exec():
+            raise RuntimeError(query.lastError().text())
+
+    def set_league(self, id: int, league_name: str, rank: Rank):
+        query = QSqlQuery(self.db)
+        if rank == Rank.UNRANKED:
+            sql = """DELETE FROM rank WHERE media_id = ?
+AND league_id = (SELECT id FROM league WHERE name = ?)"""
+            _ = query.prepare(sql)
+            query.addBindValue(id)
+            query.addBindValue(league_name)
+        else:
+            sql = """INSERT INTO rank (league_id, media_id, rank) 
+VALUES ((SELECT id FROM league WHERE name = ?), ?, ?)
+ON CONFLICT (league_id, media_id)
+DO UPDATE SET rank = excluded.rank"""
+            _ = query.prepare(sql)
+            query.addBindValue(league_name)
+            query.addBindValue(id)
+            query.addBindValue(rank.value)
+        if not query.exec():
+            raise RuntimeError(query.lastError().text())
+
+    def add_assets_path(self, path: Path):
+        query = QSqlQuery(self.db)
+        _ = query.prepare("INSERT OR IGNORE INTO asset (path) VALUES (?)")
+        query.addBindValue(str(path))
+
+        if not query.exec():
+            raise RuntimeError(query.lastError().text())
+
+    def get_assets_paths(self) -> list[Path]:
+        rows = self.execute("SELECT path FROM asset")
+        return [Path(row[0]) for row in rows]  # pyright: ignore[reportAny]
+
+
+class QueryOmoshiroi(Query):
+    def __init__(self, league: str, sql: str):
+        super().__init__(league)
+        self.sql: str = sql
+
+    def copy_and(self, condition: str) -> Query:
+        return QueryOmoshiroi(self.league, f"{self.sql} and {condition}")
+
+    def copy(self, condition: str) -> Query:
+        return QueryOmoshiroi(self.league, f"{self.sql} {condition}")
+
+    @override
+    def count_for_elo_more_than(self, elo: int) -> Query:
+        return self.copy_and(f"media.elo > {elo}")
+
+    @override
+    def no_rating_for_league(self) -> Query:
+        return self.copy_and(
+            f"""NOT EXISTS (SELECT 1 FROM rank 
+JOIN league ON league.id = rank.league_id
+WHERE rank.media_id = media.id AND league.name = "{self.league}")"""
+        )
+
+    @override
+    def has_rating_for_league(self, rank: None | Rank = None) -> Query:
+        if rank is None:
+            return QueryOmoshiroi(
+                self.league,
+                f"""EXISTS (SELECT 1 FROM rank 
+JOIN league ON league.id = rank.league_id 
+WHERE rank.media_id = media.id AND league.name = "{self.league}")""",
+            )
+        else:
+            return QueryOmoshiroi(
+                self.league,
+                f"""EXISTS (SELECT 1 FROM rank
+JOIN league ON league.id = rank.league_id
+WHERE rank.media_id = media.id AND league.name = "{self.league}" AND rank.rank = {rank.value})""",
+            )
+
+    @override
+    def limit(self, value: int) -> Query:
+        return self.copy(f"LIMIT {value}")
 
 
 class ComboBoxSQL(QComboBox):
@@ -186,154 +284,80 @@ class AddLeague(QDialog):
         layout.addRow(buttons)
 
 
-class Omoshiroi(QWidget):
-    def __init__(self):
+class PlayOmoshiroi(Play):
+    def __init__(self, database: Database, assets: Path):
         super().__init__()
+        self.database: Database = database
+        self.assets: Path = assets
 
-        data_path = Path(user_data_dir("omoshiroi2"))
-        data_path.mkdir(exist_ok=True)
+    @override
+    def set_elo(self, id: int, elo: int):
+        self.database.set_elo(id, elo)
 
-        database_path = data_path / "omoshiroi.db"
+    @override
+    def set_league(self, id: int, league: str, rank: Rank):
+        self.database.set_league(id, league, rank)
 
-        self.database: Database = Database(database_path)
+    @override
+    def load_image(self, file: File, _format: hydrus_api.RenderFormat) -> bytes | None:
+        if file.path:
+            return file.path.read_bytes()
+        else:
+            return None
 
-        print(f"The database path is {database_path}")
-
-        self.migrate()
-
-        self.show_window: Show | None = None
-
-        self.add_action: QAction = QAction("&add", self)
-        self.league_action: QAction = QAction("&league", self)
-        self.ranks_action: QAction = QAction("&ranks")
-        self.promos_action: QAction = QAction("&promos")
-        self.season_action: QAction = QAction("&season")
-        self.show_action: QAction = QAction("s&how elo")
-
-        _ = self.ranks_action.triggered.connect(self.ranks)
-        _ = self.promos_action.triggered.connect(self.promos)
-        _ = self.season_action.triggered.connect(self.season)
-        _ = self.show_action.triggered.connect(self.show_elo)
-        _ = self.add_action.triggered.connect(self.add)
-        _ = self.league_action.triggered.connect(self.league)
-
-    def cleanup(self):
-        self.database.close()
-
-    def migrate(self):
-        version = cast(int, self.database.fetch_one("PRAGMA user_version;"))
-        if version == 0:
-            print("Creating the database")
-            self.database.execute_script("""BEGIN;
-CREATE TABLE media (
-    id       INTEGER NOT NULL UNIQUE,
-    name     TEXT NOT NULL,
-    kind     TEXT NOT NULL,
-    release  TEXT NOT NULL,
-    elo      INT NOT NULL DEFAULT 1000,
-    japanese INT NOT NULL,
-    state    INT NOT NULL DEFAULT 0,
-    note     TEXT,
-    rank     INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY(id AUTOINCREMENT),
-    UNIQUE(name,kind)
-) STRICT;
-CREATE TABLE log (
-    id               INTEGER NOT NULL UNIQUE,
-    timestamp        REAL NOT NULL UNIQUE,
-    kind             TEXT NOT NULL,
-    duration_seconds INTEGER NOT NULL,
-    parent_id        INTEGER,
-    characters       INTEGER,
-    page             INTEGER,
-    eps              REAL,
-    yt_id            TEXT,
-    yt_title         TEXT,
-    notes            TEXT,
-    PRIMARY KEY(id AUTOINCREMENT),
-    FOREIGN KEY(parent_id) REFERENCES media(id)
-) STRICT;
-PRAGMA user_version = 1;
-COMMIT;""")
-            version = 1
-        if version == 1:
-            print("Migrate the database to version 2")
-            _ = self.database.execute_script("""BEGIN;
-CREATE TABLE league (
-    id   INTEGER NOT NULL UNIQUE,
-    name TEXT NOT NULL UNIQUE,
-    sql  TEXT NOT NULL UNIQUE,
-    PRIMARY KEY(id AUTOINCREMENT)
-) STRICT;
-INSERT INTO league (id, name, sql) VALUES (1, "all", "media.state != 2");
-INSERT INTO league (id, name, sql) VALUES (2, "japanese", "media.state != 2 AND media.japanese = 1");
-INSERT INTO league (id, name, sql) VALUES (3, "english", "media.state != 2 AND media.japanese = 0");
-CREATE TABLE rank (
-    league_id INTEGER NOT NULL,
-    media_id  INTEGER NOT NULL,
-    rank      INTEGER NOT NULL,
-    UNIQUE(league_id,media_id),
-    FOREIGN KEY(league_id) REFERENCES league(id),
-    FOREIGN KEY(media_id) REFERENCES media(id)
-) STRICT;
-INSERT INTO rank (league_id, media_id, rank)
-       SELECT 1, id, rank FROM media;
-ALTER TABLE media DROP COLUMN rank;
-PRAGMA user_version = 2;
-COMMIT;""")
-
-    def setup_menu(self, menu: QMenu):
-        menu.addAction(self.add_action)
-        menu.addAction(self.ranks_action)
-        menu.addAction(self.promos_action)
-        menu.addAction(self.season_action)
-        menu.addAction(self.show_action)
-        menu.addAction(self.league_action)
-
-    def add(self):
-        dialog = Add(self.database)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            _ = self.database.execute(
-                """INSERT INTO media (name, kind, release, japanese, state, note)
-       VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    dialog.name.currentText(),
-                    dialog.kind.currentText(),
-                    dialog.release.text(),
-                    dialog.japanese.isChecked(),
-                    dialog.state.currentIndex(),
-                    dialog.note.toPlainText().strip() or None,
-                ),
+    @override
+    def search_files(self, query: Query) -> list[int]:
+        query = cast(QueryOmoshiroi, query)
+        return [
+            data[0]
+            for data in self.database.execute(
+                f"SELECT media.id FROM media WHERE {query.sql}"
             )
+        ]
 
-    def league(self):
-        dialog = AddLeague()
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            _ = self.database.execute(
-                "INSERT INTO league (name, sql) VALUES (?, ?)",
-                (dialog.name.text(), dialog.sql.toPlainText().strip()),
+    @override
+    def get_files(self, ids: list[int], league: str):
+        if not ids:
+            return cast(list[File], [])
+
+        placeholders = ", ".join("?" for _ in ids)
+        sql = f"""
+            SELECT media.*, COALESCE(rank.rank, 0) AS rank
+            FROM media
+            LEFT JOIN rank
+                ON rank.media_id = media.id
+                AND rank.league_id = (
+                    SELECT id FROM league WHERE name = ?
+                )
+            WHERE media.id IN ({placeholders})
+        """
+
+        files: list[File] = []
+        for row in self.database.execute(sql, (league, *ids)):
+            id = cast(int, row[0])
+            size = (0, 0)
+            path: Path | None = None
+            paths = self.database.get_assets_paths()
+            paths.append(self.assets)
+            for p in paths:
+                for file in p.glob(f"{id}.*"):
+                    with PILImage.open(file) as img:
+                        size = img.size
+                        path = file
+                    break
+            files.append(
+                File(
+                    id,
+                    cast(int, row[4]),
+                    Rank(row[8]),
+                    size,
+                    None,
+                    cast(str, row[1]),
+                    f"{row[1]}, {row[2]}, {row[3]}, {'jp' if row[5] else 'en'}",
+                    path,
+                )
             )
-
-    def ranks(self):
-        setting_dialog = setting_page_from_database(self.database)
-        if setting_dialog.exec():
-            pass
-
-    def promos(self):
-        setting_dialog = setting_page_from_database(self.database, False)
-        if setting_dialog.exec():
-            pass
-
-    def season(self):
-        setting_dialog = setting_page_from_database(self.database)
-        if setting_dialog.exec():
-            pass
-
-    def show_elo(self):
-        setting_dialog = setting_page_from_database(self.database, False)
-        if setting_dialog.exec():
-            self.show_window = Show(self.database, setting_dialog.league)
-            self.show_window.show()
+        return files
 
 
 class BoolDelegate(QStyledItemDelegate):
@@ -450,3 +474,186 @@ def setting_page_from_database(
         data[0] for data in database.execute("SELECT league.name from league")
     ]
     return SettingPage(leagues, games_per_rank)
+
+
+class Omoshiroi(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        data_path = Path(user_data_dir("omoshiroi2"))
+        data_path.mkdir(exist_ok=True)
+
+        database_path = data_path / "omoshiroi.db"
+        self.assets: Path = data_path / "assets"
+        self.assets.mkdir(exist_ok=True)
+
+        self.database: Database = Database(database_path)
+
+        print(f"The database path is {database_path}")
+
+        self.migrate()
+
+        self.show_window: Show | None = None
+
+        self.ranks_action: QAction = QAction("&ranks")
+        self.promos_action: QAction = QAction("&promos")
+        self.season_action: QAction = QAction("&season")
+        self.add_action: QAction = QAction("&add", self)
+        self.league_action: QAction = QAction("&league", self)
+        self.show_action: QAction = QAction("s&how elo")
+        self.add_asset_dir_action: QAction = QAction("a&dd assets dir")
+
+        _ = self.ranks_action.triggered.connect(self.ranks)
+        _ = self.promos_action.triggered.connect(self.promos)
+        _ = self.season_action.triggered.connect(self.season)
+        _ = self.show_action.triggered.connect(self.show_elo)
+        _ = self.add_action.triggered.connect(self.add)
+        _ = self.league_action.triggered.connect(self.league)
+        _ = self.add_asset_dir_action.triggered.connect(self.add_assets_dir)
+
+    def cleanup(self):
+        self.database.close()
+
+    def migrate(self):
+        version = cast(int, self.database.fetch_one("PRAGMA user_version;"))
+        if version == 0:
+            print("Creating the database")
+            self.database.execute_script("""BEGIN;
+CREATE TABLE media (
+    id       INTEGER NOT NULL UNIQUE,
+    name     TEXT NOT NULL,
+    kind     TEXT NOT NULL,
+    release  TEXT NOT NULL,
+    elo      INT NOT NULL DEFAULT 1000,
+    japanese INT NOT NULL,
+    state    INT NOT NULL DEFAULT 0,
+    note     TEXT,
+    rank     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(id AUTOINCREMENT),
+    UNIQUE(name,kind)
+) STRICT;
+CREATE TABLE log (
+    id               INTEGER NOT NULL UNIQUE,
+    timestamp        REAL NOT NULL UNIQUE,
+    kind             TEXT NOT NULL,
+    duration_seconds INTEGER NOT NULL,
+    parent_id        INTEGER,
+    characters       INTEGER,
+    page             INTEGER,
+    eps              REAL,
+    yt_id            TEXT,
+    yt_title         TEXT,
+    notes            TEXT,
+    PRIMARY KEY(id AUTOINCREMENT),
+    FOREIGN KEY(parent_id) REFERENCES media(id)
+) STRICT;
+PRAGMA user_version = 1;
+COMMIT;""")
+            version = 1
+        if version == 1:
+            print("Migrate the database to version 2")
+            _ = self.database.execute_script("""BEGIN;
+CREATE TABLE league (
+    id   INTEGER NOT NULL UNIQUE,
+    name TEXT NOT NULL UNIQUE,
+    sql  TEXT NOT NULL UNIQUE,
+    PRIMARY KEY(id AUTOINCREMENT)
+) STRICT;
+INSERT INTO league (id, name, sql) VALUES (1, "all", "media.state != 2");
+INSERT INTO league (id, name, sql) VALUES (2, "japanese", "media.state != 2 AND media.japanese = 1");
+INSERT INTO league (id, name, sql) VALUES (3, "english", "media.state != 2 AND media.japanese = 0");
+CREATE TABLE rank (
+    league_id INTEGER NOT NULL,
+    media_id  INTEGER NOT NULL,
+    rank      INTEGER NOT NULL,
+    UNIQUE(league_id,media_id),
+    FOREIGN KEY(league_id) REFERENCES league(id),
+    FOREIGN KEY(media_id) REFERENCES media(id)
+) STRICT;
+INSERT INTO rank (league_id, media_id, rank)
+       SELECT 1, id, rank FROM media;
+ALTER TABLE media DROP COLUMN rank;
+PRAGMA user_version = 2;
+COMMIT;""")
+        if version == 2:
+            print("Migrate the database to version 2")
+            _ = self.database.execute_script("""BEGIN;
+CREATE TABLE "asset" (
+	"path"	TEXT NOT NULL UNIQUE
+) STRICT;
+PRAGMA user_version = 3;
+COMMIT;""")
+
+    def setup_menu(self, menu: QMenu):
+        menu.addAction(self.season_action)
+        menu.addAction(self.ranks_action)
+        menu.addAction(self.promos_action)
+        menu.addAction(self.show_action)
+        menu.addAction(self.league_action)
+        menu.addAction(self.add_action)
+        menu.addAction(self.add_asset_dir_action)
+
+    def promos(self):
+        dialog = setting_page_from_database(self.database, False)
+        if dialog.exec():
+            play: PlayOmoshiroi = PlayOmoshiroi(self.database, self.assets)
+            play.showMaximized()
+            query = self.database.get_query(dialog.league)
+            play.play(query, PromosStrategy())
+            play.start_round()
+
+    def ranks(self):
+        dialog = setting_page_from_database(self.database)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            play: PlayOmoshiroi = PlayOmoshiroi(self.database, self.assets)
+            play.showMaximized()
+            query = self.database.get_query(dialog.league)
+            play.play(query, RanksStrategy(dialog.games_per_rank))
+            play.start_round()
+
+    def season(self):
+        dialog = setting_page_from_database(self.database)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            play: PlayOmoshiroi = PlayOmoshiroi(self.database, self.assets)
+            play.showMaximized()
+            query = self.database.get_query(dialog.league)
+            play.play(query, RanksStrategy(dialog.games_per_rank))
+            play.play(query, PromosStrategy())
+            play.start_round()
+
+    def add(self):
+        dialog = Add(self.database)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            _ = self.database.execute(
+                """INSERT INTO media (name, kind, release, japanese, state, note)
+       VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    dialog.name.currentText(),
+                    dialog.kind.currentText(),
+                    dialog.release.text(),
+                    dialog.japanese.isChecked(),
+                    dialog.state.currentIndex(),
+                    dialog.note.toPlainText().strip() or None,
+                ),
+            )
+
+    def league(self):
+        dialog = AddLeague()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            _ = self.database.execute(
+                "INSERT INTO league (name, sql) VALUES (?, ?)",
+                (dialog.name.text(), dialog.sql.toPlainText().strip()),
+            )
+
+    def show_elo(self):
+        dialog = setting_page_from_database(self.database, False)
+        if dialog.exec():
+            self.show_window = Show(self.database, dialog.league)
+            self.show_window.show()
+
+    def add_assets_dir(self):
+        assets_dir = QFileDialog.getExistingDirectory(
+            self, "Choose assets directory", str(Path.home())
+        )
+        if assets_dir:
+            self.database.add_assets_path(Path(assets_dir))

@@ -204,7 +204,8 @@ class Elo:
 
                     stronger = self.get_stronger(player, possible_players)
                     weaker = self.get_weaker(player, possible_players)
-                    assert stronger or weaker
+                    if not stronger and not weaker:
+                        continue
                     if stronger and weaker:
                         opponent = random.choice([stronger, weaker])
                     if stronger and not weaker:

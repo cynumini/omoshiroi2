@@ -1,11 +1,18 @@
-from abc import abstractmethod
-from ast import For
 from dataclasses import dataclass
-from enum import Enum, StrEnum
-from typing import Callable, override
+from pathlib import Path
+from typing import override
 
+from hydrus_api import RenderFormat
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap, QResizeEvent, Qt
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QImage,
+    QKeySequence,
+    QPixmap,
+    QResizeEvent,
+    Qt,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -17,13 +24,21 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from hydrus_api import RenderFormat
 
-from omoshiroi2.elo import Action, Elo, Match, Player, PromosStrategy, Promotion, Rank, RanksStrategy, Strategy, UserInput
+from omoshiroi2.elo import (
+    Action,
+    Elo,
+    Match,
+    Player,
+    PromosStrategy,
+    Promotion,
+    Rank,
+    RanksStrategy,
+    Strategy,
+    UserInput,
+)
+from omoshiroi2.query import Query
 
-
-
-type LoadFileFn = Callable[[int, Format, tuple[int, int]], bytes],
 
 @dataclass
 class File:
@@ -32,7 +47,9 @@ class File:
     rank: Rank
     size: tuple[int, int]
     image: QPixmap | None = None
-    play: Play
+    name: str | None = None
+    line: str | None = None
+    path: Path | None = None
 
     def scale_to(
         self, size: tuple[float, float], max_size: tuple[float, float]
@@ -44,21 +61,13 @@ class File:
         else:
             return int(max_size[0]), int(max_size[0] / aspect)
 
-    def load_image(self, max_size: tuple[int, int], load_image: LoadFileFn):
+    def load_image(self, max_size: tuple[int, int], play: Play):
         if self.size[0] > max_size[0] or self.size[1] > max_size[1]:
             self.size = self.scale_to(self.size, max_size)
         self.image = QPixmap()
-        _ = self.image.loadFromData(
-            play.load_image(self.id, Format.JPEG, self.size), format=Format.JPEG
-        )
-
-    # def load_image(self, max_size: tuple[int, int], hydrus: Hydrus):
-    #     if self.size[0] > max_size[0] or self.size[1] > max_size[1]:
-    #         self.size = self.scale_to(self.size, max_size)
-    #     self.image = QPixmap()
-    #     _ = self.image.loadFromData(
-    #         hydrus.render(self.id, RenderFormat.JPEG, self.size), format="JPEG"
-    #     )
+        data = play.load_image(self, RenderFormat.JPEG)
+        if data:
+            _ = self.image.loadFromData(data)
 
 
 class ImageThread(QThread):
@@ -68,19 +77,19 @@ class ImageThread(QThread):
         self,
         files: list[File],
         max_size: tuple[int, int],
-        load_image: LoadFileFn,
+        play: Play,
     ):
         super().__init__()
         self.files: list[File] = files
         self.max_size: tuple[int, int] = max_size
-        self.load_image: LoadFileFn =load_image
+        self.play: Play = play
 
     @override
     def run(self):
         for file in self.files:
             if self.isInterruptionRequested():
                 break
-            file.load_image(self.max_size, self.load_image)
+            file.load_image(self.max_size, self.play)
             self.image_loaded.emit()
 
 
@@ -108,11 +117,16 @@ class ImageWidget(QLabel):
         self.original_pixmap = pixmap
         self.update_image()
 
-    def set_file(self, file: File):
-        self.original_pixmap = file.image or QPixmap()
-        self.info_label.setText(f"Elo: {file.elo}, Rank: {file.rank.name}")
+    def set_label(self, file: File):
+        name = f"{file.line}, " if file.line else ""
+        self.info_label.setText(
+            f"{file.id}, {name}Elo: {file.elo}, Rank: {file.rank.name}"
+        )
         self.info_label.adjustSize()
         self.info_label.raise_()
+
+    def set_file(self, file: File):
+        self.original_pixmap = file.image or QPixmap()
         self.update_image()
 
     @override
@@ -137,14 +151,13 @@ class ImageWidget(QLabel):
     def reset_image(self):
         self.original_pixmap = QPixmap()
         super().setPixmap(QPixmap())
-        self.info_label.setText("No image")
-        self.info_label.adjustSize()
-        self.info_label.raise_()
+
 
 @dataclass
 class Round:
-    league: str
+    query: Query
     strategy: Strategy
+
 
 class Play(QWidget):
     def __init__(self):
@@ -162,7 +175,17 @@ class Play(QWidget):
         draw_action = QAction("&draw", self)
         undo_action = QAction("&undo", self)
         quit_action = QAction("&quit", self)
-        for action in (win_action, lose_action, draw_action, undo_action, quit_action):
+        copy_name_a = QAction("&copy_name_a", self)
+        copy_name_d = QAction("&copy_name_d", self)
+        for action in (
+            win_action,
+            lose_action,
+            draw_action,
+            undo_action,
+            quit_action,
+            copy_name_a,
+            copy_name_d,
+        ):
             self.addAction(action)
 
         win_action.setShortcut(QKeySequence("H"))
@@ -171,11 +194,17 @@ class Play(QWidget):
         undo_action.setShortcut(QKeySequence("U"))
         quit_action.setShortcut(QKeySequence("Q"))
 
+        copy_name_a.setShortcut(QKeySequence("A"))
+        copy_name_d.setShortcut(QKeySequence("D"))
+
         _ = win_action.triggered.connect(lambda: self.act(UserInput.WIN))
         _ = lose_action.triggered.connect(lambda: self.act(UserInput.LOSE))
         _ = draw_action.triggered.connect(lambda: self.act(UserInput.DRAW))
         _ = undo_action.triggered.connect(lambda: self.act(UserInput.UNDO))
         _ = quit_action.triggered.connect(lambda: self.act(UserInput.QUIT))
+
+        _ = copy_name_a.triggered.connect(lambda: self.copy_name(self.p1))
+        _ = copy_name_d.triggered.connect(lambda: self.copy_name(self.p2))
 
         self.win_button: QPushButton = QPushButton("left win (h)")
         self.draw_button: QPushButton = QPushButton("draw (j)")
@@ -220,14 +249,36 @@ class Play(QWidget):
         self.rank: Rank | None = None
         self.first: bool = True
 
-    def set_elo(self, id: int, elo: int):
+    def set_elo(self, _id: int, _elo: int) -> None:
         raise NotImplementedError
 
-    def set_league(self, id: int, league: str, rank: Rank):
+    def set_league(self, _id: int, _league: str, _rank: Rank) -> None:
         raise NotImplementedError
 
-    def load_image(self, id: int, format: RenderFormat, size: tuple[int, int]):
+    def load_image(self, file: File, _format: RenderFormat) -> bytes | None:
         raise NotImplementedError
+
+    def search_files(self, _query: Query) -> list[int]:
+        raise NotImplementedError
+
+    def get_files(self, _ids: list[int], _league: str) -> list[File]:
+        raise NotImplementedError
+
+    def remove_invalid_ranks(self):
+        assert self.round
+        # no more fit
+        query = self.round.query.has_rating_for_league()
+        ids_with_rank = self.search_files(query)
+        query = self.round.query
+        all_ids_that_fit = self.search_files(query)
+        wrong_ids = list(set(ids_with_rank) - set(all_ids_that_fit))
+        for id in wrong_ids:
+            self.set_league(id, self.round.query.league, Rank.UNRANKED)
+        # unranked
+        query = self.round.query.has_rating_for_league(Rank.UNRANKED)
+        no_rating_for_league_ids = self.search_files(query)
+        for id in no_rating_for_league_ids:
+            self.set_league(id, self.round.query.league, Rank.UNRANKED)
 
     def start_round(self):
         if self.first:
@@ -239,9 +290,11 @@ class Play(QWidget):
         self.right_image.setText("right")
 
         self.round = self.rounds.pop(0)
-        self.setWindowTitle(self.round.league)
+        self.setWindowTitle(self.round.query.league)
 
-        files = self.get_files(self.round.strategy)
+        self.remove_invalid_ranks()
+
+        files = self.get_filtred_files(self.round.strategy)
 
         players = [Player(file.id, file.elo, file.rank) for file in files]
 
@@ -266,19 +319,26 @@ class Play(QWidget):
         max_width = size.width()
         max_height = size.height()
 
-        self.image_thread = ImageThread(
-            self.resources, (max_width, max_height), self.load_image
-        )
+        self.image_thread = ImageThread(self.resources, (max_width, max_height), self)
         _ = self.image_thread.image_loaded.connect(self.update_image)
         self.image_thread.start()
 
         self.advance()
 
     def update_image(self):
+        if self.p1:
+            self.left_image.set_label(self.p1)
+        if self.p2:
+            self.right_image.set_label(self.p2)
+
         if self.p1 and self.p1.image:
             self.left_image.set_file(self.p1)
+        else:
+            self.left_image.reset_image()
         if self.p2 and self.p2.image:
             self.right_image.set_file(self.p2)
+        else:
+            self.right_image.reset_image()
         if self.p1 and self.p1.image and self.p2 and self.p2.image:
             total = (
                 self.p1.size[0] / self.p1.size[1] + self.p2.size[0] / self.p2.size[1]
@@ -346,7 +406,7 @@ class Play(QWidget):
             for id, data in self.elo.result.items():
                 self.set_elo(id, data.elo)
                 assert self.round
-                self.set_league(id, self.round.league, data.rank)
+                self.set_league(id, self.round.query.league, data.rank)
             if self.rounds:
                 self.round_bar.setValue(self.round_bar.value() + 1)
                 self.start_round()
@@ -373,65 +433,58 @@ class Play(QWidget):
                 return item
         return None
 
-    def find_best_elo(self, max_ids: int, tags: list[str]) -> int:
+    def find_best_elo(self, max_ids: int, tags: Query) -> int:
         best_elo = 0
         elo = 0
 
-        ids = self.hydrus.search_files(tags)
+        ids = self.search_files(tags)
 
         while len(ids) >= max_ids:
             best_elo = elo
             if len(ids) == max_ids:
                 return best_elo
             elo += 100
-            tmp_tags = tags.copy()
-            elo_tag = f"system:count for elo more than {elo}"
-            tmp_tags.append(elo_tag)
-            ids = self.hydrus.search_files(tmp_tags)
+
+            ids = self.search_files(tags.count_for_elo_more_than(elo))
             print(f"With elo = {elo}, count = {len(ids)}")
 
         return best_elo
 
-    def get_files(self, strategy: Strategy):
+    def get_filtred_files(self, strategy: Strategy):
         ids: list[int] = []
 
         ranked_ids_len: int = 0
 
         # ranked - start
         assert self.round
-        tag = f"system:has rating for league.{self.round.league}"
-        ranked_ids = self.hydrus.search_files([tag])
+        query = self.round.query.has_rating_for_league()
+        ranked_ids = self.search_files(query)
         ranked_ids_len = len(ranked_ids)
         ids.extend(ranked_ids)
         print(f"Ranked files = {ranked_ids_len}")
         # ranked - end
 
-        tags = self.config.get(self.round.league)
-        no_rating_tag = f"system:no rating for league.{self.round.league}"
-        tags.append(no_rating_tag)
+        tags = self.round.query.no_rating_for_league()
 
         match strategy:
             case RanksStrategy():
-                tags.append("system:limit is 1024")
-                ids.extend(self.hydrus.search_files(tags))
+                ids.extend(self.search_files(tags.limit(1024)))
             case PromosStrategy():
-                wood_rank_ids = self.hydrus.search_files(
-                    [tag, f"system:rating for league.{self.round.league} is 1/6"]
+                wood_rank_ids = self.search_files(
+                    self.round.query.has_rating_for_league(Rank.WOOD)
                 )
                 elo = self.find_best_elo(
                     max(Rank.WOOD.max() - len(wood_rank_ids) + 1, 0), tags
                 )
-                elo_tag = f"system:count for elo more than {elo}"
-                tags.append(elo_tag)
-                unranked_ids = self.hydrus.search_files(tags)
+                unranked_ids = self.search_files(tags.count_for_elo_more_than(elo))
                 ids.extend(unranked_ids)
 
         print(f"Unranked files = {len(ids) - ranked_ids_len}")
 
-        return self.hydrus.get_files(ids, self.round.league)
+        return self.get_files(ids, self.round.query.league)
 
-    def play(self, league_name: str, strategy: Strategy):
-        self.rounds.append(Round(league_name, strategy))
+    def play(self, query: Query, strategy: Strategy):
+        self.rounds.append(Round(query, strategy))
 
     @override
     def closeEvent(self, event: QCloseEvent):
@@ -439,3 +492,7 @@ class Play(QWidget):
             self.image_thread.requestInterruption()
             _ = self.image_thread.wait()
         event.accept()
+
+    def copy_name(self, file: File | None):
+        if file and file.name:
+            QApplication.clipboard().setText(file.name)

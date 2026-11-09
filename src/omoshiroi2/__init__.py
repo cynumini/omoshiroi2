@@ -1,9 +1,6 @@
 import sys
 
-from PySide6.QtWidgets import (
-    QApplication,
-    QMainWindow,
-)
+from PySide6.QtWidgets import QApplication, QMainWindow
 
 from omoshiroi2.hydrus_elo import HydrusElo
 from omoshiroi2.omoshiroi import Omoshiroi
